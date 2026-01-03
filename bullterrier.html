@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>特工牛头梗：触控强化版</title>
+    <style>
+        body { margin: 0; padding: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100vh; background-color: #1a1a1a; font-family: 'Arial', sans-serif; overflow: hidden; color: white; touch-action: none; }
+        canvas { background-color: #87CEEB; max-width: 100%; max-height: 70vh; border-top: 2px solid #fff; border-bottom: 2px solid #fff; image-rendering: auto; }
+        .ui { position: absolute; top: 10px; text-align: center; width: 100%; pointer-events: none; }
+        h1 { margin: 5px 0; font-size: 24px; text-shadow: 2px 2px #000; }
+        
+        /* 虚拟手柄容器 */
+        .controls-layer { position: absolute; bottom: 30px; width: 100%; height: 160px; display: flex; justify-content: space-between; align-items: center; padding: 0 40px; box-sizing: border-box; }
+        
+        /* 摇杆 */
+        #joy-base { width: 120px; height: 120px; background: rgba(255,255,255,0.1); border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; display: flex; justify-content: center; align-items: center; }
+        #joy-stick { width: 50px; height: 50px; background: rgba(255,255,255,0.6); border-radius: 50%; position: absolute; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
+
+        /* 动作按钮 */
+        .action-group { display: flex; gap: 20px; }
+        .ctrl-btn { width: 75px; height: 75px; border-radius: 50%; border: 3px solid #fff; display: flex; justify-content: center; align-items: center; font-weight: bold; font-size: 16px; text-shadow: 1px 1px #000; }
+        #btn-jump { background: rgba(46, 204, 113, 0.4); }
+        #btn-shoot { background: rgba(231, 76, 60, 0.4); }
+        .ctrl-btn:active { transform: scale(0.9); opacity: 0.8; }
+    </style>
+</head>
+<body>
+    <div class="ui">
+        <h1 id="scoreDisplay">分数: 0</h1>
+        <p id="bestScoreDisplay">最高分: 0</p>
+    </div>
+    
+    <canvas id="gameCanvas"></canvas>
+
+    <div class="controls-layer">
+        <div id="joy-base">
+            <div id="joy-stick"></div>
+        </div>
+        <div class="action-group">
+            <div class="ctrl-btn" id="btn-jump">跳跃</div>
+            <div class="ctrl-btn" id="btn-shoot">发射</div>
+        </div>
+    </div>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreDisplay = document.getElementById('scoreDisplay');
+    const bestScoreDisplay = document.getElementById('bestScoreDisplay');
+
+    canvas.width = 800;
+    canvas.height = 400;
+
+    const bgImage = new Image();
+    bgImage.src = 'my_bg.png'; 
+
+    const bgMusic = new Audio('bgm.mp3'); 
+    bgMusic.loop = true;
+    bgMusic.volume = 0.3;
+    let isMusicPlaying = false;
+
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playSound(freq, type, duration, vol = 0.1) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    }
+
+    const gravity = 0.5;
+    let score = 0;
+    let bestScore = localStorage.getItem('catGameBest') || 0;
+    let gameActive = true;
+    let obstacles = [];
+    let bones = []; 
+    let frameCount = 0;
+    let moveX = 0; // 用于摇杆控制移动
+
+    bestScoreDisplay.innerText = `最高分: ${bestScore}`;
+
+    // --- 摇杆逻辑核心 ---
+    const joyBase = document.getElementById('joy-base');
+    const joyStick = document.getElementById('joy-stick');
+    
+    function handleJoy(e) {
+        if (!gameActive) return;
+        e.preventDefault();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        if (!isMusicPlaying) { bgMusic.play().catch(()=>{}); isMusicPlaying = true; }
+
+        const touch = e.touches[0];
+        const rect = joyBase.getBoundingClientRect();
+        const centerX = rect.left + rect.width/2;
+        const centerY = rect.top + rect.height/2;
+        let dx = touch.clientX - centerX;
+        let dy = touch.clientY - centerY;
+        const dist = Math.min(Math.sqrt(dx*dx + dy*dy), 50);
+        const angle = Math.atan2(dy, dx);
+        
+        const lx = Math.cos(angle) * dist;
+        const ly = Math.sin(angle) * dist;
+        joyStick.style.transform = `translate(${lx}px, ${ly}px)`;
+        
+        moveX = lx / 50; // 将偏移量转化为移动比例
+    }
+
+    joyBase.addEventListener('touchstart', handleJoy);
+    joyBase.addEventListener('touchmove', handleJoy);
+    joyBase.addEventListener('touchend', () => {
+        joyStick.style.transform = `translate(0px, 0px)`;
+        moveX = 0;
+    });
+
+    // --- 按键逻辑 ---
+    document.getElementById('btn-jump').addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        if (gameActive) cat.jump();
+        else resetGame();
+    });
+
+    document.getElementById('btn-shoot').addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        if (gameActive) cat.shoot();
+    });
+
+    function resetGame() {
+        score = 0; obstacles = []; bones = []; gameActive = true;
+        cat.x = 100; cat.y = 200; scoreDisplay.innerText = `分数: 0`;
+        loop();
+    }
+
+    class Bone {
+        constructor(x, y, dir) {
+            this.x = x; this.y = y; this.width = 20; this.height = 10;
+            this.speed = 12 * dir;
+        }
+        draw() {
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(this.x, this.y, 15, 8);
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 4, 0, Math.PI*2);
+            ctx.arc(this.x, this.y+8, 4, 0, Math.PI*2);
+            ctx.arc(this.x+15, this.y, 4, 0, Math.PI*2);
+            ctx.arc(this.x+15, this.y+8, 4, 0, Math.PI*2);
+            ctx.fill();
+        }
+        update() { this.x += this.speed; }
+    }
+
+    const cat = {
+        x: 100, y: 290, width: 100, height: 75, vx: 0, vy: 0, speed: 7, jumpForce: -12.5,
+        grounded: false, jumpCount: 0, facing: 1, 
+        draw() {
+            ctx.save();
+            let walkCycle = Math.sin(frameCount * 0.2);
+            let bobbing = this.grounded && Math.abs(this.vx) > 0.1 ? walkCycle * 3 : 0;
+            ctx.translate(this.x + this.width/2, this.y + this.height/2 + bobbing);
+            if (this.vx < -0.1) this.facing = -1;
+            if (this.vx > 0.1) this.facing = 1;
+            ctx.scale(this.facing, 1);
+            ctx.fillStyle = 'rgba(0,0,0,0.1)';
+            ctx.beginPath(); ctx.ellipse(0, 32 - bobbing, 35, 8, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 9; ctx.lineCap = 'round';
+            let legSway = Math.sin(frameCount * 0.2) * 12;
+            ctx.beginPath(); ctx.moveTo(-15, 10); ctx.lineTo(-15 - legSway, 28 - bobbing); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(15, 10); ctx.lineTo(15 + legSway, 28 - bobbing); ctx.stroke();
+            ctx.fillStyle = '#FFFFFF'; ctx.beginPath(); ctx.ellipse(0, 0, 42, 28, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.save();
+            ctx.translate(28, -25);
+            ctx.rotate(Math.PI/12 + (bobbing * 0.02));
+            ctx.beginPath(); ctx.ellipse(12, 0, 32, 21, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#ddd'; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(-5, -12); ctx.bezierCurveTo(-15, -5, -18, 12, -10, 18); ctx.lineTo(2, 5); ctx.fill(); ctx.stroke();
+            ctx.strokeStyle = '#555'; ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(5, -12); ctx.lineTo(12, -8); ctx.stroke(); 
+            ctx.beginPath(); ctx.moveTo(22, -9); ctx.lineTo(28, -13); ctx.stroke();
+            ctx.fillStyle = '#111'; ctx.beginPath(); ctx.arc(12, -3, 3.5, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(26, -5, 3.5, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = 'white'; ctx.beginPath(); ctx.arc(13.5, -4.5, 1.2, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(27.5, -6.5, 1.2, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = 'black'; ctx.beginPath(); ctx.ellipse(42, 6, 5, 4, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.restore();
+            ctx.save(); ctx.translate(18, -8); ctx.fillStyle = '#ff4757';
+            ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-10, -6); ctx.lineTo(-10, 6); ctx.closePath(); ctx.fill();
+            ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(10, -6); ctx.lineTo(10, 6); ctx.closePath(); ctx.fill();
+            ctx.fillStyle = '#ff6b81'; ctx.beginPath(); ctx.arc(0, 0, 3.5, 0, Math.PI * 2); ctx.fill();
+            ctx.restore(); ctx.restore();
+        },
+        update() {
+            this.vy += gravity;
+            this.y += this.vy;
+            // 使用摇杆数据控制 VX
+            this.vx = moveX * this.speed;
+            this.x += this.vx;
+            
+            if (this.x < 0) this.x = 0;
+            if (this.x + this.width > canvas.width) this.x = canvas.width - this.width;
+            if (this.y + this.height > canvas.height - 30) {
+                this.y = canvas.height - 30 - this.height;
+                this.vy = 0;
+                this.grounded = true;
+                this.jumpCount = 0;
+            }
+        },
+        jump() {
+            if (this.grounded || this.jumpCount < 2) {
+                this.vy = this.jumpForce;
+                this.grounded = false;
+                this.jumpCount++;
+                playSound(150 + this.jumpCount * 100, 'triangle', 0.1);
+            }
+        },
+        shoot() {
+            bones.push(new Bone(this.x + (this.facing === 1 ? this.width : 0), this.y + 20, this.facing));
+            playSound(800, 'sawtooth', 0.05, 0.05);
+        }
+    };
+
+    class Obstacle {
+        constructor() {
+            this.width = 70; this.height = 40;
+            this.x = canvas.width; this.y = canvas.height - 40 - (Math.random() * 100); 
+            this.speed = 5 + (score * 0.15);
+            const symbols = ['流言', 'アホ', '中傷', '消えろ','無能','クズ','バカ','ゴミ'];
+            this.text = symbols[Math.floor(Math.random() * symbols.length)];
+        }
+        draw() {
+            ctx.save(); ctx.translate(this.x, this.y);
+            ctx.fillStyle = 'rgba(0,0,0,0.2)'; ctx.beginPath(); ctx.roundRect(3, 3, this.width, this.height, 10); ctx.fill();
+            ctx.fillStyle = '#ff4757'; ctx.strokeStyle = 'white'; ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.roundRect(0, 0, this.width, this.height, 10); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(10, this.height); ctx.lineTo(5, this.height + 12); ctx.lineTo(20, this.height); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = 'white'; ctx.font = 'bold 16px Arial'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(this.text, this.width / 2, this.height / 2); ctx.restore();
+        }
+        update() { this.x -= this.speed; }
+    }
+
+    function loop() {
+        if (!gameActive) return;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (bgImage.complete && bgImage.width > 0) ctx.drawImage(bgImage, 0, 0, canvas.width, canvas.height);
+        else { ctx.fillStyle = '#87CEEB'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+        ctx.fillStyle = 'rgba(46, 204, 113, 0.8)'; ctx.fillRect(0, canvas.height - 30, canvas.width, 30);
+        cat.update(); cat.draw();
+        for (let i = bones.length - 1; i >= 0; i--) {
+            bones[i].update(); bones[i].draw();
+            if (bones[i].x > canvas.width || bones[i].x < -50) bones.splice(i, 1);
+        }
+        if (frameCount % Math.max(30, 80 - score) === 0) obstacles.push(new Obstacle());
+        for (let i = obstacles.length - 1; i >= 0; i--) {
+            obstacles[i].update(); obstacles[i].draw();
+            for (let j = bones.length - 1; j >= 0; j--) {
+                if (bones[j].x < obstacles[i].x + obstacles[i].width && bones[j].x + bones[j].width > obstacles[i].x && bones[j].y < obstacles[i].y + obstacles[i].height && bones[j].y + bones[j].height > obstacles[i].y) {
+                    obstacles.splice(i, 1); bones.splice(j, 1); score += 5;
+                    scoreDisplay.innerText = `分数: ${score}`; playSound(400, 'square', 0.1); break;
+                }
+            }
+            if (obstacles[i] && cat.x + 20 < obstacles[i].x + obstacles[i].width && cat.x + cat.width - 20 > obstacles[i].x && cat.y + 10 < obstacles[i].y + obstacles[i].height && cat.y + cat.height > obstacles[i].y) {
+                gameActive = false; playSound(100, 'sawtooth', 0.5, 0.2);
+                if (score > bestScore) { bestScore = score; localStorage.setItem('catGameBest', bestScore); }
+                showGameOver();
+            }
+            if (obstacles[i] && obstacles[i].x + obstacles[i].width < 0) {
+                obstacles.splice(i, 1); score++; scoreDisplay.innerText = `分数: ${score}`;
+            }
+        }
+        frameCount++;
+        requestAnimationFrame(loop);
+    }
+
+    function showGameOver() {
+        ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'white'; ctx.textAlign = 'center';
+        ctx.font = '30px Arial'; ctx.fillText('言葉に負けるな', canvas.width/2, canvas.height/2);
+        ctx.font = '18px Arial'; ctx.fillText('点击跳跃键重开', canvas.width/2, canvas.height/2 + 40);
+    }
+
+    loop();
+</script>
+</body>
+</html>
